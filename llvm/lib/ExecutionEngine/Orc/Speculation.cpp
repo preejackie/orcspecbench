@@ -36,11 +36,30 @@ void ImplSymbolMap::trackImpls(SymbolAliasMap ImplMaps, JITDylib *SrcJD) {
   }
 }
 
+// Trigger Speculative Compiles.
+void Speculator::speculateForEntryPoint(Speculator *Ptr, uint64_t StubId) {
+  assert(Ptr && " Null Address Received in orc_speculate_for ");
+  Ptr->speculateFor(StubId);
+}
+
+Error Speculator::addSpeculationRuntime(JITDylib &JD,
+                                        MangleAndInterner &Mangle) {
+  JITEvaluatedSymbol ThisPtr(pointerToJITTargetAddress(this),
+                             JITSymbolFlags::Exported);
+  JITEvaluatedSymbol SpeculateForEntryPtr(
+      pointerToJITTargetAddress(&speculateForEntryPoint),
+      JITSymbolFlags::Exported);
+  return JD.define(absoluteSymbols({
+      {Mangle("__orc_speculator"), ThisPtr},                // Data Symbol
+      {Mangle("__orc_speculate_for"), SpeculateForEntryPtr} // Callable Symbol
+  }));
+}
+
 // If two modules, share the same LLVMContext, different threads must
 // not access those modules concurrently, doing so leave the
 // LLVMContext in in-consistent state.
 // But here since each TSM has a unique Context associated with it,
-// on locking is necessary!
+// locking is unnecessary!
 void IRSpeculationLayer::emit(MaterializationResponsibility R,
                               ThreadSafeModule TSM) {
 
@@ -67,14 +86,49 @@ void IRSpeculationLayer::emit(MaterializationResponsibility R,
   // Simplify CFG helps the static branch prediction heuristics!
   for (auto &Fn : TSM.getModuleUnlocked()->getFunctionList()) {
     if (!Fn.isDeclaration()) {
-      auto IRNames = QueryAnalysis(Fn, FAM);
+      auto IRNames = QueryAnalysis(Fn);
       // Instrument and register if Query has result
       if (IRNames.hasValue()) {
-        Mutator.SetInsertPoint(&(Fn.getEntryBlock().front()));
+
+        // Emit globals for each function.
+        auto LoadValueTy = Type::getInt8Ty(InContext);
+        auto SpeculatorGuard =
+            new GlobalVariable(*TSM.getModuleUnlocked(), LoadValueTy, false,
+                               GlobalValue::LinkageTypes::InternalLinkage,
+                               ConstantInt::get(LoadValueTy, 0),
+                               "__orc_speculate.guard.for." + Fn.getName());
+        SpeculatorGuard->setAlignment(1);
+        SpeculatorGuard->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
+
+        BasicBlock &ProgramEntry = Fn.getEntryBlock();
+        // Create BasicBlocks before the program's entry basicblock
+        BasicBlock *SpeculateBlock = BasicBlock::Create(
+            InContext, "__orc_speculate.block", &Fn, &ProgramEntry);
+        BasicBlock *SpeculateDecisionBlock = BasicBlock::Create(
+            InContext, "__orc_speculate.decision.block", &Fn, SpeculateBlock);
+
+        assert(SpeculateDecisionBlock == &Fn.getEntryBlock() &&
+               "SpeculateDecisionBlock not updated?");
+        Mutator.SetInsertPoint(SpeculateDecisionBlock);
+
+        auto LoadGuard =
+            Mutator.CreateLoad(LoadValueTy, SpeculatorGuard, "guard.value");
+        // if just loaded value equal to 0,return true.
+        auto CanSpeculate =
+            Mutator.CreateICmpEQ(LoadGuard, ConstantInt::get(LoadValueTy, 0),
+                                 "compare.to.speculate");
+        Mutator.CreateCondBr(CanSpeculate, SpeculateBlock, &ProgramEntry);
+
+        Mutator.SetInsertPoint(SpeculateBlock);
         auto ImplAddrToUint =
             Mutator.CreatePtrToInt(&Fn, Type::getInt64Ty(InContext));
         Mutator.CreateCall(RuntimeCallTy, RuntimeCall,
                            {SpeclAddr, ImplAddrToUint});
+        Mutator.CreateStore(ConstantInt::get(LoadValueTy, 1), SpeculatorGuard);
+        Mutator.CreateBr(&ProgramEntry);
+
+        assert(Mutator.GetInsertBlock()->getParent() == &Fn &&
+               "IR builder association mismatch?");
         S.registerSymbols(internToJITSymbols(IRNames.getValue()),
                           &R.getTargetJITDylib());
       }
@@ -85,12 +139,6 @@ void IRSpeculationLayer::emit(MaterializationResponsibility R,
          "Speculation Instrumentation breaks IR?");
 
   NextLayer.emit(std::move(R), std::move(TSM));
-}
-
-// Runtime Function Implementation
-extern "C" void __orc_speculate_for(Speculator *Ptr, uint64_t StubId) {
-  assert(Ptr && " Null Address Received in orc_speculate_for ");
-  Ptr->speculateFor(StubId);
 }
 
 } // namespace orc

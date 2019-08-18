@@ -7,12 +7,13 @@
 //===----------------------------------------------------------------------===//
 // \file
 /// Contains the Analyses and Result Interpretation to select likely functions
-/// to Speculatively compile before they are called. [Experimentation]
+/// to Speculatively compile before they are called. [Purely Experimentation]
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_EXECUTIONENGINE_ORC_SPECULATEANALYSES_H
 #define LLVM_EXECUTIONENGINE_ORC_SPECULATEANALYSES_H
 
+#include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/ExecutionEngine/Orc/Core.h"
 #include "llvm/ExecutionEngine/Orc/Speculation.h"
 
@@ -22,17 +23,65 @@ namespace llvm {
 
 namespace orc {
 
-// Direct calls in high frequency basic blocks are extracted.
-class BlockFreqQuery {
-private:
+// Provides interface to Queries.
+class SpeculateQuery {
+protected:
   void findCalles(const BasicBlock *, DenseSet<StringRef> &);
-  size_t numBBToGet(size_t);
+  bool isStraightLine(const Function &F);
 
 public:
   using ResultTy = Optional<DenseMap<StringRef, DenseSet<StringRef>>>;
+  virtual ResultTy operator()(Function &) = 0;
+  virtual ~SpeculateQuery() = default;
+};
 
+// Direct calls in high frequency basic blocks are extracted.
+class BlockFreqQuery : public SpeculateQuery {
+private:
+  size_t numBBToGet(size_t);
+public:
   // Find likely next executables based on IR Block Frequency
-  ResultTy operator()(Function &F, FunctionAnalysisManager &FAM);
+  ResultTy operator()(Function &F) override;
+};
+
+// This Query generates a sequence of basic blocks which follows the order of
+// execution.
+// A handful of BB with higher block frequencies are taken, then path to entry
+// and end BB are discovered by traversing up & down the CFG.
+
+class SequenceBBQuery : public SpeculateQuery {
+private:
+  struct WalkDirection {
+  public:
+    bool Upward, Downward;
+    // the block associated contain a call
+    bool CallerBlock;
+    WalkDirection() : Upward(true), Downward(true), CallerBlock(false) {}
+  };
+
+public:
+  using VisitedBlocksInfoTy = DenseMap<const BasicBlock *, WalkDirection>;
+  using BlockListTy = SmallVector<const BasicBlock *, 8>;
+  using BackEdgesInfoTy =
+      SmallVector<std::pair<const BasicBlock *, const BasicBlock *>, 8>;
+  using BlockFreqInfoTy =
+      SmallVector<std::pair<const BasicBlock *, uint64_t>, 8>;
+
+private:
+  std::size_t getHottestBlocks(std::size_t TotalBlocks);
+  BlockListTy rearrangeBB(const Function &, const BlockListTy &);
+  BlockListTy queryCFG(Function &, const BlockListTy &);
+  void traverseToEntryBlock(const BasicBlock *, const BlockListTy &,
+                            const BackEdgesInfoTy &,
+                            const BranchProbabilityInfo *,
+                            VisitedBlocksInfoTy &);
+  void traverseToExitBlock(const BasicBlock *, const BlockListTy &,
+                           const BackEdgesInfoTy &,
+                           const BranchProbabilityInfo *,
+                           VisitedBlocksInfoTy &);
+
+public:
+  ResultTy operator()(Function &F) override;
 };
 
 } // namespace orc
