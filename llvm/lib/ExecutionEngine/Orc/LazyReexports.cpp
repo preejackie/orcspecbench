@@ -11,6 +11,8 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/ExecutionEngine/Orc/OrcABISupport.h"
 
+#include <chrono>
+
 #define DEBUG_TYPE "orc"
 
 namespace llvm {
@@ -41,9 +43,10 @@ JITTargetAddress
 LazyCallThroughManager::callThroughToSymbol(JITTargetAddress TrampolineAddr) {
   JITDylib *SourceJD = nullptr;
   SymbolStringPtr SymbolName;
-
+  auto st_time = std::chrono::high_resolution_clock::now();
   {
     std::lock_guard<std::mutex> Lock(LCTMMutex);
+
     auto I = Reexports.find(TrampolineAddr);
     if (I == Reexports.end())
       return ErrorHandlerAddr;
@@ -76,7 +79,13 @@ LazyCallThroughManager::callThroughToSymbol(JITTargetAddress TrampolineAddr) {
       return ErrorHandlerAddr;
     }
   }
-
+  {
+   std::lock_guard<std::mutex> Lock(LCTMMutex);
+   auto et_time = std::chrono::high_resolution_clock::now();
+   auto latency =
+      std::chrono::duration_cast<std::chrono::microseconds>(et_time - st_time);
+   CompilationTime.insert({SymbolName,latency.count()});
+  }
   return ResolvedAddr;
 }
 

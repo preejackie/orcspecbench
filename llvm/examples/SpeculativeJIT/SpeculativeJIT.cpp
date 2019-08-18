@@ -19,6 +19,7 @@
 
 #include <list>
 #include <string>
+#include <chrono>
 
 using namespace llvm;
 using namespace llvm::orc;
@@ -84,7 +85,8 @@ public:
     return ES->lookup({&ES->getMainJITDylib()}, Mangle(UnmangledName));
   }
 
-  ~SpeculativeJIT() { CompileThreads.wait(); }
+  ~SpeculativeJIT() { CompileThreads.wait();
+  }
 
 private:
   using IndirectStubsManagerBuilderFunction =
@@ -185,11 +187,18 @@ int main(int argc, char *argv[]) {
 
   // Look up the JIT'd main, cast it to a function pointer, then call it.
 
+  auto st_time = std::chrono::high_resolution_clock::now();
+
   auto MainSym = ExitOnErr(SJ->lookup("main"));
   int (*Main)(int, const char *[]) =
       (int (*)(int, const char *[]))MainSym.getAddress();
 
   Main(ArgV.size() - 1, ArgV.data());
 
-  return 0;
+  auto et_time = std::chrono::high_resolution_clock::now();
+  auto latency =
+      std::chrono::duration_cast<std::chrono::microseconds>(et_time - st_time);
+
+  llvm::errs() << "\n Execution Time " << latency.count();
+ return 0;
 }

@@ -20,6 +20,7 @@
 #include "llvm/ExecutionEngine/Orc/IndirectionUtils.h"
 #include "llvm/ExecutionEngine/Orc/Speculation.h"
 
+#include<chrono>
 namespace llvm {
 
 class Triple;
@@ -51,6 +52,11 @@ public:
   private:
     virtual void anchor();
   };
+
+  ~LazyCallThroughManager(){
+    for(auto I:CompilationTime)
+      llvm::errs() << "\n Symbol " << I.first <<" Compilation Time "<<I.second;
+  }
 
   template <typename NotifyResolvedImpl>
   class NotifyResolvedFunctionImpl : public NotifyResolvedFunction {
@@ -105,6 +111,8 @@ private:
   std::unique_ptr<TrampolinePool> TP;
   ReexportsMap Reexports;
   NotifiersMap Notifiers;
+
+  DenseMap<SymbolStringPtr,long int> CompilationTime;
 };
 
 /// A lazy call-through manager that builds trampolines in the current process.
